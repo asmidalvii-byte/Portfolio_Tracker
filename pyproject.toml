@@ -1,0 +1,22 @@
+[project]
+name = "portfolio_tracker"
+version = "0.1.0"
+description = "A simple Python portfolio tracker for managing holdings and computing portfolio value."
+authors = [
+    { name = "Portfolio Tracker" }
+]
+readme = "README.md"
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent"
+]
+dependencies = []
+
+[project.scripts]
+portfolio-tracker = "portfolio_tracker.main:main"
+
+[build-system]
+requires = ["setuptools>=65.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
