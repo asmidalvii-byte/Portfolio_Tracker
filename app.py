@@ -1,226 +1,192 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import numpy as np
+import sqlalchemy as db
 import plotly.graph_objects as go
-from datetime import datetime, date
+import plotly.express as px
+from datetime import datetime
 
-# -- Strategy logic
+# -- Database setup
+engine = db.create_engine("sqlite:///portfolio.db")
 
-def moving_average_crossover(df, short=20, long=50):
-    df = df.copy()
-    df["short_ma"] = df["Close"].rolling(short).mean()
-    df["long_ma"] = df["Close"].rolling(long).mean()
-    df["signal"] = 0
-    df.loc[df["short_ma"] > df["long_ma"], "signal"] = 1
-    df.loc[df["short_ma"] < df["long_ma"], "signal"] = -1
-    df["position"] = df["signal"].diff()
-    return df
+def init_db():
+    with engine.connect() as conn:
+        conn.execute(db.text("""
+            CREATE TABLE IF NOT EXISTS holdings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker TEXT NOT NULL,
+                shares REAL NOT NULL,
+                buy_price REAL NOT NULL,
+                date_added TEXT NOT NULL
+            )
+        """))
+        conn.commit()
 
-def rsi_strategy(df, period=14, oversold=30, overbought=70):
-    df = df.copy()
-    delta = df["Close"].diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(period).mean()
-    avg_loss = loss.rolling(period).mean()
-    rs = avg_gain / avg_loss
-    df["rsi"] = 100 - (100 / (1 + rs))
-    df["signal"] = 0
-    df.loc[df["rsi"] < oversold, "signal"] = 1
-    df.loc[df["rsi"] > overbought, "signal"] = -1
-    df["position"] = df["signal"].diff()
-    return df
+# -- Data functions
+def get_holdings():
+    with engine.connect() as conn:
+        result = conn.execute(db.text("SELECT * FROM holdings"))
+        return pd.DataFrame(result.fetchall(), columns=result.keys())
 
-def run_backtest(df, initial_capital=10000):
-    capital = initial_capital
-    shares = 0
-    trades = []
-    portfolio_values = []
-    buy_price = 0
-    in_position = False
+def add_holding(ticker, shares, buy_price):
+    with engine.connect() as conn:
+        conn.execute(db.text("""
+            INSERT INTO holdings (ticker, shares, buy_price, date_added)
+            VALUES (:ticker, :shares, :buy_price, :date)
+        """), {"ticker": ticker.upper(), "shares": shares, "buy_price": buy_price, "date": datetime.today().strftime("%Y-%m-%d")})
+        conn.commit()
 
-    for i, row in df.iterrows():
-        price = row["Close"]
-        sig = row["signal"]
+def delete_holding(holding_id):
+    with engine.connect() as conn:
+        conn.execute(db.text("DELETE FROM holdings WHERE id = :id"), {"id": holding_id})
+        conn.commit()
 
-        if sig == 1 and not in_position and capital >= price:
-            shares = capital / price
-            buy_price = price
-            capital = 0
-            in_position = True
-            trades.append({
-                "Date": i,
-                "Action": "BUY",
-                "Price": round(price, 2),
-                "Shares": round(shares, 4),
-                "Value": round(shares * price, 2),
-                "P&L": "—",
-                "P&L %": "—"
-            })
+def get_live_price(ticker):
+    try:
+        stock = yf.Ticker(ticker)
+        return round(stock.fast_info["last_price"], 2)
+    except:
+        return None
 
-        elif sig == -1 and in_position and shares > 0:
-            capital = shares * price
-            pnl = (price - buy_price) * shares
-            pnl_pct = ((price - buy_price) / buy_price) * 100
-            trades.append({
-                "Date": i,
-                "Action": "SELL",
-                "Price": round(price, 2),
-                "Shares": round(shares, 4),
-                "Value": round(capital, 2),
-                "P&L": round(pnl, 2),
-                "P&L %": round(pnl_pct, 2)
-            })
-            shares = 0
-            in_position = False
-
-        portfolio_value = capital + shares * price
-        portfolio_values.append({"Date": i, "Value": portfolio_value})
-
-    final_value = capital + shares * df["Close"].iloc[-1]
-    return trades, portfolio_values, final_value
-
-def calc_metrics(portfolio_values, initial_capital, trades):
-    df_pv = pd.DataFrame(portfolio_values).set_index("Date")
-    total_return = ((df_pv["Value"].iloc[-1] - initial_capital) / initial_capital) * 100
-    daily_returns = df_pv["Value"].pct_change().dropna()
-    sharpe = (daily_returns.mean() / daily_returns.std()) * np.sqrt(252) if daily_returns.std() != 0 else 0
-    rolling_max = df_pv["Value"].cummax()
-    drawdown = (df_pv["Value"] - rolling_max) / rolling_max * 100
-    max_drawdown = drawdown.min()
-    sell_trades = [t for t in trades if t["Action"] == "SELL"]
-    wins = [t for t in sell_trades if t.get("P&L", 0) > 0]
-    win_rate = (len(wins) / len(sell_trades) * 100) if sell_trades else 0
-    return {
-        "Total Return %": round(total_return, 2),
-        "Sharpe Ratio": round(sharpe, 2),
-        "Max Drawdown %": round(max_drawdown, 2),
-        "Win Rate %": round(win_rate, 2),
-        "Total Trades": len(sell_trades)
-    }
+def get_price_history(ticker, period="3mo"):
+    try:
+        df = yf.Ticker(ticker).history(period=period)
+        return df["Close"]
+    except:
+        return None
 
 # -- App
-st.set_page_config(page_title="Backtesting Engine", layout="wide")
-st.title("Backtesting Engine")
+init_db()
 
-# Sidebar controls
-with st.sidebar:
-    st.header("Settings")
-    ticker = st.text_input("Ticker", value="AAPL")
-    start_date = st.date_input("Start date", value=date(2020, 1, 1))
-    end_date = st.date_input("End date", value=date.today())
-    initial_capital = st.number_input("Initial capital (USD)", value=10000, min_value=100, step=100)
-    strategy = st.selectbox("Strategy", ["Moving Average Crossover", "RSI Oversold/Overbought"])
+st.set_page_config(page_title="Portfolio Tracker", layout="wide")
+st.title("Portfolio Tracker")
 
-    if strategy == "Moving Average Crossover":
-        short_ma = st.slider("Short MA period", 5, 50, 20)
-        long_ma = st.slider("Long MA period", 20, 200, 50)
-    else:
-        rsi_period = st.slider("RSI period", 7, 30, 14)
-        oversold = st.slider("Oversold threshold", 20, 40, 30)
-        overbought = st.slider("Overbought threshold", 60, 80, 70)
-
-    run = st.button("Run backtest")
-
-if run:
-    with st.spinner("Fetching data and running backtest..."):
-        raw = yf.Ticker(ticker).history(start=start_date, end=end_date)
-
-        if raw.empty:
-            st.error("No data found. Check the ticker and date range.")
+# Add new position
+with st.expander("Add new position", expanded=False):
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        ticker = st.text_input("Ticker (e.g. AAPL)")
+    with col2:
+        shares = st.number_input("Shares", min_value=0.01, step=0.01)
+    with col3:
+        buy_price = st.number_input("Buy price (USD)", min_value=0.01, step=0.01)
+    if st.button("Add to portfolio"):
+        if ticker and shares and buy_price:
+            add_holding(ticker, shares, buy_price)
+            st.success(f"Added {shares} shares of {ticker.upper()} at ${buy_price}")
+            st.rerun()
         else:
-            if strategy == "Moving Average Crossover":
-                df = moving_average_crossover(raw, short_ma, long_ma)
-            else:
-                df = rsi_strategy(raw, rsi_period, oversold, overbought)
+            st.warning("Fill in all fields first.")
 
-            trades, portfolio_values, final_value = run_backtest(df, initial_capital)
-            metrics = calc_metrics(portfolio_values, initial_capital, trades)
+# Load holdings
+holdings = get_holdings()
 
-            # Metrics
-            st.subheader("Performance")
-            m1, m2, m3, m4, m5 = st.columns(5)
-            m1.metric("Total Return", f"{metrics['Total Return %']}%")
-            m2.metric("Sharpe Ratio", metrics["Sharpe Ratio"])
-            m3.metric("Max Drawdown", f"{metrics['Max Drawdown %']}%")
-            m4.metric("Win Rate", f"{metrics['Win Rate %']}%")
-            m5.metric("Total Trades", metrics["Total Trades"])
+if holdings.empty:
+    st.info("No positions yet — add your first stock above.")
+else:
+    rows = []
+    values = []
+    tickers_list = []
 
-            st.divider()
-
-            # Portfolio value chart
-            st.subheader("Portfolio value over time")
-            df_pv = pd.DataFrame(portfolio_values)
-            df_bh = pd.DataFrame({
-                "Date": df.index,
-                "Value": initial_capital * (df["Close"] / df["Close"].iloc[0])
+    for _, row in holdings.iterrows():
+        live = get_live_price(row["ticker"])
+        if live:
+            pnl = (live - row["buy_price"]) * row["shares"]
+            pnl_pct = ((live - row["buy_price"]) / row["buy_price"]) * 100
+            value = live * row["shares"]
+            values.append(value)
+            tickers_list.append(row["ticker"])
+            rows.append({
+                "ID": row["id"],
+                "Ticker": row["ticker"],
+                "Shares": row["shares"],
+                "Buy Price": f"${row['buy_price']:.2f}",
+                "Live Price": f"${live:.2f}",
+                "Value": f"${value:.2f}",
+                "P&L": f"${pnl:.2f}",
+                "P&L %": f"{pnl_pct:.2f}%",
+                "Added": row["date_added"]
             })
 
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=df_pv["Date"], y=df_pv["Value"],
-                mode="lines", name="Strategy",
-                line=dict(color="#1a9e6e", width=2)
+    df = pd.DataFrame(rows)
+    total_value = sum(float(r["Value"].replace("$", "")) for r in rows)
+    total_pnl = sum(float(r["P&L"].replace("$", "")) for r in rows)
+    total_cost = sum(h["shares"] * h["buy_price"] for _, h in holdings.iterrows())
+
+    # Metrics
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Portfolio Value", f"${total_value:,.2f}")
+    m2.metric("Total P&L", f"${total_pnl:,.2f}", delta=f"{(total_pnl / total_cost * 100):.2f}%")
+    m3.metric("Positions", len(rows))
+    m4.metric("Cost Basis", f"${total_cost:,.2f}")
+
+    st.divider()
+
+    # Charts
+    chart_col1, chart_col2 = st.columns(2)
+
+    # Allocation pie chart
+    with chart_col1:
+        st.subheader("Allocation")
+        fig_pie = px.pie(
+            names=tickers_list,
+            values=values,
+            hole=0.4,
+            color_discrete_sequence=px.colors.sequential.Teal
+        )
+        fig_pie.update_layout(
+            paper_bgcolor="#0e1117",
+            plot_bgcolor="#0e1117",
+            font=dict(color="white"),
+            legend=dict(font=dict(color="white")),
+            margin=dict(t=20, b=20, l=20, r=20)
+        )
+        fig_pie.update_traces(textfont_color="white")
+        st.plotly_chart(fig_pie, use_container_width=True)
+
+    # Price history chart
+    with chart_col2:
+        st.subheader("Price history")
+        selected = st.selectbox("Select stock", options=tickers_list)
+        period = st.radio("Period", ["1mo", "3mo", "6mo", "1y"], horizontal=True, index=1)
+        hist = get_price_history(selected, period)
+        if hist is not None and not hist.empty:
+            fig_line = go.Figure()
+            fig_line.add_trace(go.Scatter(
+                x=hist.index,
+                y=hist.values,
+                mode="lines",
+                line=dict(color="#1a9e6e", width=2),
+                fill="tozeroy",
+                fillcolor="rgba(26,158,110,0.1)",
+                name=selected
             ))
-            fig.add_trace(go.Scatter(
-                x=df_bh["Date"], y=df_bh["Value"],
-                mode="lines", name="Buy and hold",
-                line=dict(color="#888", width=1.5, dash="dash")
-            ))
-            fig.update_layout(
-                paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+            fig_line.update_layout(
+                paper_bgcolor="#0e1117",
+                plot_bgcolor="#0e1117",
                 font=dict(color="white"),
                 xaxis=dict(showgrid=False, color="white"),
                 yaxis=dict(showgrid=True, gridcolor="#222", color="white"),
-                legend=dict(font=dict(color="white")),
-                margin=dict(t=20, b=20, l=20, r=20)
+                margin=dict(t=20, b=20, l=20, r=20),
+                showlegend=False
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig_line, use_container_width=True)
+        else:
+            st.warning("Could not load price history.")
 
-            st.divider()
+    st.divider()
 
-            # Price chart with buy/sell signals
-            st.subheader("Price chart with signals")
-            buy_signals = [t for t in trades if t["Action"] == "BUY"]
-            sell_signals = [t for t in trades if t["Action"] == "SELL"]
+    # Holdings table
+    st.subheader("Holdings")
+    st.dataframe(df.drop(columns=["ID"]), use_container_width=True)
 
-            fig2 = go.Figure()
-            fig2.add_trace(go.Scatter(
-                x=df.index, y=df["Close"],
-                mode="lines", name="Price",
-                line=dict(color="#4a9eda", width=1.5)
-            ))
-            if buy_signals:
-                fig2.add_trace(go.Scatter(
-                    x=[t["Date"] for t in buy_signals],
-                    y=[t["Price"] for t in buy_signals],
-                    mode="markers", name="Buy",
-                    marker=dict(color="#1a9e6e", size=10, symbol="triangle-up")
-                ))
-            if sell_signals:
-                fig2.add_trace(go.Scatter(
-                    x=[t["Date"] for t in sell_signals],
-                    y=[t["Price"] for t in sell_signals],
-                    mode="markers", name="Sell",
-                    marker=dict(color="#d84b2a", size=10, symbol="triangle-down")
-                ))
-            fig2.update_layout(
-                paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
-                font=dict(color="white"),
-                xaxis=dict(showgrid=False, color="white"),
-                yaxis=dict(showgrid=True, gridcolor="#222", color="white"),
-                legend=dict(font=dict(color="white")),
-                margin=dict(t=20, b=20, l=20, r=20)
-            )
-            st.plotly_chart(fig2, use_container_width=True)
+    st.divider()
 
-            st.divider()
-
-            # Trade log
-            st.subheader("Trade log")
-            if trades:
-                df_trades = pd.DataFrame(trades).fillna("—")
-                st.dataframe(df_trades, use_container_width=True)
-            else:
-                st.info("No trades were triggered with these settings.")
+    # Remove position
+    st.subheader("Remove a position")
+    del_id = st.selectbox("Select position to remove", options=holdings["id"].tolist(),
+                           format_func=lambda x: holdings[holdings["id"] == x]["ticker"].values[0])
+    if st.button("Remove"):
+        delete_holding(del_id)
+        st.success("Position removed.")
+        st.rerun()
