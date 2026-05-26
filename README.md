@@ -1,54 +1,27 @@
 # Portfolio Tracker
 
-A lightweight Python portfolio tracker for managing holdings, showing current value, and saving the portfolio to disk.
+A live stock portfolio tracker built with Python and Streamlit that shows how your investments are performing in real time.
 
-## Features
+## What it does
 
-- Add, remove, and list holdings
-- Compute total portfolio value
-- Persist portfolio data in a JSON file
-- CLI interface for quick usage
+- Add stocks with purchase price and quantity
+- Fetches live US stock prices via yfinance
+- Calculates P&L per position and total portfolio value
+- Interactive allocation pie chart showing portfolio breakdown
+- Price history chart with adjustable time periods
+- Persistent storage with SQLite database
 
-## Requirements
+## Tech stack
 
-- Python 3.10+
+Python · Streamlit · Plotly · yfinance · pandas · SQLAlchemy · SQLite
 
-## Installation
-
-1. Create and activate a virtual environment:
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-```
-
-2. Install the package:
+## How to run locally
 
 ```bash
-python -m pip install -e .
+pip install -r requirements.txt
+streamlit run app.py
 ```
 
-## Usage
+## Live demo
 
-Run the CLI command:
-
-```bash
-portfolio-tracker --help
-```
-
-Example commands:
-
-```bash
-portfolio-tracker add --symbol AAPL --shares 5 --price 170.00
-portfolio-tracker list
-portfolio-tracker value
-```
-
-## Development
-
-Run tests with `pytest`:
-
-```bash
-python -m pip install pytest
-pytest
-```
+https://portfoliotracker-d8npsnkzpyebcgddmfy3uk.streamlit.app
